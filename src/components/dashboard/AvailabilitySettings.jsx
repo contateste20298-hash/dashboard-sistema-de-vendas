@@ -1,0 +1,348 @@
+import React, { useState, useEffect } from 'react';
+import { motion } from 'framer-motion';
+import { Clock, Plus, Trash2, Save, Loader2, CalendarClock, AlertCircle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
+import { useToast } from '@/components/ui/use-toast';
+import { supabase } from '@/lib/customSupabaseClient';
+import { cn } from '@/lib/utils';
+
+const DAYS = [
+  { id: 0, label: 'Domingo' },
+  { id: 1, label: 'Segunda-feira' },
+  { id: 2, label: 'Terça-feira' },
+  { id: 3, label: 'Quarta-feira' },
+  { id: 4, label: 'Quinta-feira' },
+  { id: 5, label: 'Sexta-feira' },
+  { id: 6, label: 'Sábado' },
+];
+
+// Simple UUID generator for client-side ID creation
+function generateUUID() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+const AvailabilitySettings = ({ userId }) => {
+  const { toast } = useToast();
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [availabilities, setAvailabilities] = useState([]);
+  
+  // Initialize with some default structure or fetch existing
+  useEffect(() => {
+    fetchAvailabilities();
+  }, [userId]);
+
+  const fetchAvailabilities = async () => {
+    if (!userId) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('availabilities')
+        .select('*')
+        .eq('user_id', userId)
+        .order('day_of_week')
+        .order('time_start');
+
+      if (error) throw error;
+      setAvailabilities(data || []);
+    } catch (err) {
+      console.error('Error fetching availabilities:', err);
+      toast({
+        title: "Erro ao carregar",
+        description: "Não foi possível carregar seus horários.",
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!userId) return;
+    setSaving(true);
+    try {
+      // Basic validation: Check ensuring start < end for all slots
+      for (const slot of availabilities) {
+        if (slot.time_start >= slot.time_end) {
+           toast({
+             title: "Horário Inválido",
+             description: `O horário de início deve ser anterior ao fim (${DAYS[slot.day_of_week].label}).`,
+             variant: "destructive"
+           });
+           setSaving(false);
+           return;
+        }
+      }
+
+      const recordsToInsert = [];
+      const recordsToUpdate = [];
+      const currentValidIds = [];
+
+      availabilities.forEach(a => {
+        const isTemp = !a.id || (typeof a.id === 'string' && a.id.startsWith('temp_'));
+        
+        // Generate a proper UUID for new records if they don't have one
+        const recordId = isTemp ? generateUUID() : a.id;
+
+        const payload = {
+          id: recordId, // Explicitly set ID for both insert and update
+          user_id: userId,
+          day_of_week: a.day_of_week,
+          time_start: a.time_start,
+          time_end: a.time_end,
+          is_active: a.is_active
+        };
+
+        if (isTemp) {
+          recordsToInsert.push(payload);
+        } else {
+          recordsToUpdate.push(payload);
+          currentValidIds.push(a.id);
+        }
+      });
+
+      // 1. DELETE removed records
+      if (currentValidIds.length > 0) {
+        const { error: deleteError } = await supabase
+          .from('availabilities')
+          .delete()
+          .eq('user_id', userId)
+          .not('id', 'in', `(${currentValidIds.join(',')})`);
+          
+        if (deleteError) throw deleteError;
+      } else {
+        // If no existing IDs are kept, delete all previous records for this user
+        // But be careful not to delete the ones we are about to insert (though they don't exist in DB yet)
+        const { error: deleteAllError } = await supabase
+           .from('availabilities')
+           .delete()
+           .eq('user_id', userId);
+           
+         if (deleteAllError) throw deleteAllError;
+      }
+
+      // 2. UPDATE existing records
+      if (recordsToUpdate.length > 0) {
+        const { error: updateError } = await supabase
+          .from('availabilities')
+          .upsert(recordsToUpdate)
+          .select();
+
+        if (updateError) throw updateError;
+      }
+
+      // 3. INSERT new records
+      if (recordsToInsert.length > 0) {
+        const { error: insertError } = await supabase
+          .from('availabilities')
+          .insert(recordsToInsert)
+          .select();
+
+        if (insertError) throw insertError;
+      }
+
+      // Refresh to get any new IDs generated by DB and ensure UI is in sync
+      await fetchAvailabilities();
+
+      toast({
+        title: "Horários salvos!",
+        description: "Sua disponibilidade foi atualizada com sucesso.",
+        className: "bg-green-500 border-none text-white"
+      });
+    } catch (err) {
+      console.error(err);
+      toast({ 
+        title: "Erro ao salvar", 
+        description: err.message || "Verifique sua conexão e tente novamente.", 
+        variant: "destructive" 
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const addInterval = (dayId) => {
+    const newSlot = {
+      id: `temp_${Math.random().toString(36).substr(2, 9)}`, // Temp ID for UI key only
+      user_id: userId,
+      day_of_week: dayId,
+      time_start: '09:00',
+      time_end: '17:00',
+      is_active: true
+    };
+    setAvailabilities([...availabilities, newSlot]);
+  };
+
+  const removeInterval = (idToRemove) => {
+    setAvailabilities(availabilities.filter((a) => a.id !== idToRemove));
+  };
+
+  const updateInterval = (id, field, value) => {
+    setAvailabilities(availabilities.map(a => 
+      a.id === id ? { ...a, [field]: value } : a
+    ));
+  };
+
+  // Group availabilities by day for rendering
+  const getDayAvailabilities = (dayId) => availabilities.filter(a => a.day_of_week === dayId);
+
+  const toggleDay = (dayId, isActive) => {
+    const daySlots = getDayAvailabilities(dayId);
+    
+    if (daySlots.length === 0 && isActive) {
+      addInterval(dayId);
+    } else {
+       const updated = availabilities.map(a => 
+          a.day_of_week === dayId ? { ...a, is_active: isActive } : a
+       );
+       setAvailabilities(updated);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex justify-center items-center py-12">
+        <Loader2 className="h-8 w-8 animate-spin text-[#E2C28A]" />
+      </div>
+    );
+  }
+
+  if (!userId) {
+    return (
+      <div className="flex justify-center items-center py-12 text-white/50">
+        Usuário não identificado.
+      </div>
+    );
+  }
+
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="max-w-4xl mx-auto space-y-6"
+    >
+      <div className="flex items-center gap-3 mb-2">
+        <div className="p-3 bg-[#E2C28A]/10 rounded-xl">
+          <CalendarClock className="h-6 w-6 text-[#E2C28A]" />
+        </div>
+        <div>
+          <h2 className="text-2xl font-bold text-white">Configurar Disponibilidade</h2>
+          <p className="text-white/40 text-sm">Defina os horários em que você aceita novos agendamentos.</p>
+        </div>
+      </div>
+
+      <div className="bg-[#0A1B3D]/60 backdrop-blur-md border border-white/10 rounded-xl p-6 space-y-6">
+        {availabilities.length === 0 && !loading && (
+           <div className="bg-blue-500/10 border border-blue-500/20 p-4 rounded-lg flex items-start gap-3 mb-6">
+              <AlertCircle className="h-5 w-5 text-blue-400 mt-0.5" />
+              <div>
+                 <p className="text-blue-100 font-medium text-sm">Nenhum horário configurado</p>
+                 <p className="text-blue-200/60 text-xs mt-1">Ative os dias da semana abaixo para começar a receber agendamentos.</p>
+              </div>
+           </div>
+        )}
+
+        <div className="space-y-4">
+          {DAYS.map((day) => {
+            const daySlots = availabilities.filter(a => a.day_of_week === day.id);
+            const active = daySlots.length > 0 && daySlots.some(s => s.is_active);
+
+            return (
+              <div key={day.id} className={cn(
+                "border rounded-xl transition-all duration-300",
+                active ? "bg-white/5 border-white/10" : "bg-transparent border-white/5 opacity-70 hover:opacity-100"
+              )}>
+                <div className="p-4 flex items-center justify-between">
+                   <div className="flex items-center gap-3">
+                      <Switch 
+                        checked={active}
+                        onCheckedChange={(checked) => toggleDay(day.id, checked)}
+                        className="data-[state=checked]:bg-[#E2C28A]"
+                      />
+                      <span className={cn("font-medium", active ? "text-white" : "text-white/40")}>
+                        {day.label}
+                      </span>
+                   </div>
+                   
+                   {active && (
+                     <Button 
+                       variant="ghost" 
+                       size="sm" 
+                       onClick={() => addInterval(day.id)}
+                       className="text-[#E2C28A] hover:bg-[#E2C28A]/10 hover:text-[#E2C28A] h-8"
+                     >
+                        <Plus className="h-4 w-4 mr-1" /> Adicionar Intervalo
+                     </Button>
+                   )}
+                </div>
+
+                {active && (
+                   <div className="px-4 pb-4 space-y-3 animate-in slide-in-from-top-2">
+                      {daySlots.map((slot) => (
+                         <div key={slot.id} className="flex items-center gap-3 pl-12">
+                            <div className="flex items-center gap-2 flex-1">
+                               <div className="relative flex-1">
+                                 <Clock className="absolute left-3 top-2.5 h-4 w-4 text-white/30" />
+                                 <Input 
+                                   type="time" 
+                                   className="pl-9 h-9 bg-[#0A1B3D] border-white/20"
+                                   value={slot.time_start}
+                                   onChange={(e) => updateInterval(slot.id, 'time_start', e.target.value)}
+                                 />
+                               </div>
+                               <span className="text-white/40">-</span>
+                               <div className="relative flex-1">
+                                 <Clock className="absolute left-3 top-2.5 h-4 w-4 text-white/30" />
+                                 <Input 
+                                   type="time" 
+                                   className="pl-9 h-9 bg-[#0A1B3D] border-white/20"
+                                   value={slot.time_end}
+                                   onChange={(e) => updateInterval(slot.id, 'time_end', e.target.value)}
+                                 />
+                               </div>
+                            </div>
+                            <Button 
+                               variant="ghost" 
+                               size="icon" 
+                               onClick={() => removeInterval(slot.id)}
+                               className="text-red-400 hover:text-red-300 hover:bg-red-400/10 h-9 w-9"
+                            >
+                               <Trash2 className="h-4 w-4" />
+                            </Button>
+                         </div>
+                      ))}
+                   </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="flex justify-end pt-4 border-t border-white/5">
+        <Button 
+           size="lg"
+           onClick={handleSave}
+           disabled={saving}
+           className="bg-[#E2C28A] text-[#0A1B3D] hover:bg-[#d4b06a] font-bold min-w-[150px]"
+        >
+           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Save className="h-4 w-4 mr-2" /> Salvar Disponibilidade</>}
+        </Button>
+      </div>
+    </motion.div>
+  );
+};
+
+export default AvailabilitySettings;

@@ -1,0 +1,129 @@
+import React, { useEffect, useState } from 'react';
+import { motion } from 'framer-motion';
+import { AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react';
+import WeeklyMission from '@/components/dashboard/WeeklyMission';
+import PerformanceCards from '@/components/dashboard/PerformanceCards';
+import RankingSection from '@/components/dashboard/RankingSection';
+import PatentSystem from '@/components/dashboard/PatentSystem'; // Imported PatentSystem
+import { supabase } from '@/lib/customSupabaseClient';
+import { Button } from '@/components/ui/button';
+import { useToast } from '@/components/ui/use-toast';
+
+const OverviewTab = ({ userId }) => {
+  const { toast } = useToast();
+  const [integrationStatus, setIntegrationStatus] = useState('checking'); // checking, connected, disconnected, expired
+  const [integrationLoading, setIntegrationLoading] = useState(true);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const checkIntegrations = async () => {
+      if (!userId) return;
+      
+      try {
+        setIntegrationLoading(true);
+        console.log('[OverviewTab] Checking calendar integrations...');
+        
+        const { data: integration, error } = await supabase
+          .from('calendar_integrations')
+          .select('*')
+          .eq('user_id', userId)
+          .eq('provider', 'google')
+          .single();
+
+        if (error && error.code !== 'PGRST116') {
+          console.error('[OverviewTab] Integration check error:', error);
+          throw error;
+        }
+
+        if (isMounted) {
+          if (!integration) {
+            console.log('[OverviewTab] No integration found.');
+            setIntegrationStatus('disconnected');
+          } else {
+            const now = new Date();
+            const expiresAt = new Date(integration.expires_at);
+            if (expiresAt < now) {
+              console.log('[OverviewTab] Integration expired.');
+              setIntegrationStatus('expired');
+            } else {
+              console.log('[OverviewTab] Integration active.');
+              setIntegrationStatus('connected');
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[OverviewTab] Failed to check integrations:', err);
+        // Don't block UI on this error, just show default or disconnected state logic
+      } finally {
+        if (isMounted) setIntegrationLoading(false);
+      }
+    };
+
+    checkIntegrations();
+
+    return () => { isMounted = false; };
+  }, [userId]);
+
+  const handleRefreshIntegration = async () => {
+    // Navigate to settings or trigger refresh. For now, we'll just reload the check.
+    // In a real scenario, this might open the CalendarSetupModal or redirect.
+    toast({ title: "Verificando...", description: "Atualizando status da conexão." });
+    window.location.reload(); 
+  };
+
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4 }}
+      className="space-y-6"
+    >
+      {/* Integration Alert Banner */}
+      {!integrationLoading && integrationStatus !== 'connected' && (
+        <motion.div 
+          initial={{ opacity: 0, height: 0 }} 
+          animate={{ opacity: 1, height: 'auto' }}
+          className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 flex items-center justify-between"
+        >
+          <div className="flex items-center gap-3 text-amber-200">
+            <AlertTriangle className="h-5 w-5" />
+            <div>
+              <p className="font-bold text-sm">Atenção: Google Calendar não conectado</p>
+              <p className="text-xs opacity-80">
+                {integrationStatus === 'expired' 
+                  ? "Sua conexão expirou. Reconecte para evitar conflitos de agenda."
+                  : "Conecte sua agenda para permitir que leads agendem reuniões com você."}
+              </p>
+            </div>
+          </div>
+          <Button 
+            size="sm" 
+            variant="outline" 
+            onClick={() => document.querySelector('[data-value="settings"]')?.click()} 
+            className="bg-amber-500/10 border-amber-500/30 text-amber-200 hover:bg-amber-500/20"
+          >
+            Resolver Agora
+          </Button>
+        </motion.div>
+      )}
+
+      {/* Main Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Left Column: Mission & Patents */}
+        <div className="lg:col-span-1 flex flex-col gap-6">
+          <WeeklyMission userId={userId} />
+          <PatentSystem userId={userId} />
+        </div>
+        
+        {/* Right Column: Stats & Rankings */}
+        <div className="lg:col-span-2 flex flex-col gap-6">
+           <PerformanceCards userId={userId} />
+           <RankingSection currentUserId={userId} />
+        </div>
+      </div>
+    </motion.div>
+  );
+};
+
+export default OverviewTab;
