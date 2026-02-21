@@ -14,7 +14,7 @@ const ProfileSettings = ({ session }) => {
   const fileInputRef = useRef(null);
   const [loading, setLoading] = useState(false);
   const [passLoading, setPassLoading] = useState(false);
-  
+
   // Profile Data
   const [userProfile, setUserProfile] = useState(null);
   const [formData, setFormData] = useState({
@@ -48,9 +48,9 @@ const ProfileSettings = ({ session }) => {
         .select('*')
         .eq('id', session.user.id)
         .maybeSingle();
-      
+
       if (error) throw error;
-      
+
       if (data) {
         setUserProfile(data);
         setFormData({
@@ -77,11 +77,11 @@ const ProfileSettings = ({ session }) => {
 
         try {
           toast({ title: "Conectando...", description: "Trocando credenciais com o Google." });
-          
+
           const { data, error } = await supabase.functions.invoke('exchange-google-token', {
-            body: { 
-              code, 
-              redirect_uri: window.location.origin 
+            body: {
+              code,
+              redirect_uri: window.location.origin
             }
           });
 
@@ -113,9 +113,9 @@ const ProfileSettings = ({ session }) => {
         } catch (err) {
           console.error('OAuth Error:', err);
           toast({
-             title: "Erro na conexão",
-             description: err.message,
-             variant: "destructive"
+            title: "Erro na conexão",
+            description: err.message,
+            variant: "destructive"
           });
         } finally {
           setLoading(false);
@@ -129,24 +129,16 @@ const ProfileSettings = ({ session }) => {
   const checkCalendarIntegration = async () => {
     if (!session?.user?.id) return;
     try {
-      const { data: integration } = await supabase
-        .from('calendar_integrations')
-        .select('*')
-        .eq('user_id', session.user.id)
-        .eq('provider', 'google')
-        .maybeSingle();
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('google_refresh_token, access_token, token_expiry, selected_calendar_id')
+        .eq('id', session.user.id)
+        .single();
 
-      if (integration) {
-        const now = new Date();
-        const expiresAt = new Date(integration.expires_at);
-        if (expiresAt > now) {
-           setCalendarConnected(true);
-           if (integration.selected_calendar_id) {
-             // Just a placeholder name since we don't store calendar name, or fetched it
-             setSelectedCalendarName('Agenda Ativa'); 
-           }
-        } else {
-           setCalendarConnected(false);
+      if (profile?.google_refresh_token) {
+        setCalendarConnected(true);
+        if (profile.selected_calendar_id) {
+          setSelectedCalendarName('Agenda Ativa');
         }
       } else {
         setCalendarConnected(false);
@@ -158,25 +150,51 @@ const ProfileSettings = ({ session }) => {
 
   const handleConnectGoogle = async () => {
     try {
-      const { data, error } = await supabase.functions.invoke('google-calendar', {
-        body: { action: 'get-auth-url', redirect_uri: window.location.origin }
+      console.log('[Google Auth] Iniciando conexão unificada...');
+
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Usuário não autenticado');
+
+      const { data, error } = await supabase.functions.invoke(`google-calendar?action=auth-url&user_id=${user.id}`, {
+        method: 'POST',
+        body: { user_id: user.id },
+        headers: {
+          'Content-Type': 'application/json'
+        }
       });
-      
-      if (error) throw error;
-      if (data?.url) window.location.href = data.url;
+
+      console.log('[Google Auth] Response:', data);
+
+      if (error) {
+        console.error('[Google Auth] Error Object:', error);
+        let errorMsg = error.message || "Erro na função";
+        if (error.context?.statusText) errorMsg += ` (${error.context.statusText})`;
+        throw new Error(errorMsg);
+      }
+
+      if (data?.url) {
+        window.location.href = data.url;
+      } else {
+        throw new Error('URL de autenticação não recebida do servidor.');
+      }
     } catch (err) {
-      toast({ title: "Erro", description: "Não foi possível iniciar a conexão.", variant: "destructive" });
+      console.error('[Google Auth] Error:', err);
+      toast({
+        title: "Erro na Conexão",
+        description: err.message || "Não foi possível iniciar a conexão.",
+        variant: "destructive"
+      });
     }
   };
 
   const handleDisconnectGoogle = async () => {
     try {
-       await supabase.from('calendar_integrations').delete().eq('user_id', session.user.id).eq('provider', 'google');
-       setCalendarConnected(false);
-       setSelectedCalendarName('');
-       toast({ title: "Desconectado", description: "Google Calendar removido." });
+      await supabase.from('calendar_integrations').delete().eq('user_id', session.user.id).eq('provider', 'google');
+      setCalendarConnected(false);
+      setSelectedCalendarName('');
+      toast({ title: "Desconectado", description: "Google Calendar removido." });
     } catch (err) {
-       toast({ title: "Erro", description: "Falha ao desconectar.", variant: "destructive" });
+      toast({ title: "Erro", description: "Falha ao desconectar.", variant: "destructive" });
     }
   };
 
@@ -186,36 +204,36 @@ const ProfileSettings = ({ session }) => {
     if (!file) return;
 
     if (!file.type.startsWith('image/')) {
-       toast({ title: "Formato inválido", description: "Selecione uma imagem.", variant: "destructive" });
-       return;
+      toast({ title: "Formato inválido", description: "Selecione uma imagem.", variant: "destructive" });
+      return;
     }
 
     setLoading(true);
     try {
-       const fileExt = file.name.split('.').pop();
-       const fileName = `${Date.now()}.${fileExt}`;
-       const filePath = `${session.user.id}/${fileName}`;
-       
-       const { error: uploadError } = await supabase.storage.from('avatars').upload(filePath, file, { upsert: true });
-       if (uploadError) throw uploadError;
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${Date.now()}.${fileExt}`;
+      const filePath = `${session.user.id}/${fileName}`;
 
-       const { data: { publicUrl } } = supabase.storage.from('avatars').getPublicUrl(filePath);
+      const { error: uploadError } = await supabase.storage.from('avatars').upload(filePath, file, { upsert: true });
+      if (uploadError) throw uploadError;
 
-       setFormData(prev => ({ ...prev, avatar_url: publicUrl }));
-       
-       await supabase.from('profiles').upsert({ 
-          id: session.user.id, 
-          avatar_url: publicUrl,
-          updated_at: new Date().toISOString()
-       });
+      const { data: { publicUrl } } = supabase.storage.from('avatars').getPublicUrl(filePath);
 
-       toast({ title: "Foto atualizada!", className: "bg-green-500 border-none text-white" });
-       fetchProfile();
+      setFormData(prev => ({ ...prev, avatar_url: publicUrl }));
+
+      await supabase.from('profiles').upsert({
+        id: session.user.id,
+        avatar_url: publicUrl,
+        updated_at: new Date().toISOString()
+      });
+
+      toast({ title: "Foto atualizada!", className: "bg-green-500 border-none text-white" });
+      fetchProfile();
 
     } catch (error) {
-       toast({ title: "Erro no upload", description: error.message, variant: "destructive" });
+      toast({ title: "Erro no upload", description: error.message, variant: "destructive" });
     } finally {
-       setLoading(false);
+      setLoading(false);
     }
   };
 
@@ -277,28 +295,28 @@ const ProfileSettings = ({ session }) => {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {/* LEFT: Info & Calendar */}
         <div className="md:col-span-2 space-y-6">
-          
+
           {/* PERSONAL INFO */}
           <div className="bg-[#0A1B3D]/60 backdrop-blur-md border border-[#E2C28A]/20 rounded-xl p-6">
             <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2"><User className="h-4 w-4 text-[#E2C28A]" /> Informações Pessoais</h3>
             <div className="space-y-4">
-               <div className="flex items-center gap-4 p-4 bg-white/5 rounded-xl border border-white/5">
-                  <Avatar className="h-16 w-16 border-2 border-[#E2C28A]">
-                     <AvatarImage src={formData.avatar_url} />
-                     <AvatarFallback className="bg-[#152a55] text-[#E2C28A] text-xl">{formData.name?.charAt(0) || 'U'}</AvatarFallback>
-                  </Avatar>
-                  <div>
-                     <p className="text-sm font-medium text-white">Foto de Perfil</p>
-                     <Button type="button" size="sm" variant="outline" disabled={loading} onClick={() => fileInputRef.current?.click()} className="bg-white/5 border-white/10 hover:bg-white/10 text-xs h-8 text-white mt-2">
-                        <Upload className="mr-2 h-3 w-3" /> {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Alterar Foto'}
-                     </Button>
-                     <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleAvatarUpload} />
-                  </div>
-               </div>
+              <div className="flex items-center gap-4 p-4 bg-white/5 rounded-xl border border-white/5">
+                <Avatar className="h-16 w-16 border-2 border-[#E2C28A]">
+                  <AvatarImage src={formData.avatar_url} />
+                  <AvatarFallback className="bg-[#152a55] text-[#E2C28A] text-xl">{formData.name?.charAt(0) || 'U'}</AvatarFallback>
+                </Avatar>
+                <div>
+                  <p className="text-sm font-medium text-white">Foto de Perfil</p>
+                  <Button type="button" size="sm" variant="outline" disabled={loading} onClick={() => fileInputRef.current?.click()} className="bg-white/5 border-white/10 hover:bg-white/10 text-xs h-8 text-white mt-2">
+                    <Upload className="mr-2 h-3 w-3" /> {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Alterar Foto'}
+                  </Button>
+                  <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleAvatarUpload} />
+                </div>
+              </div>
 
               <div className="grid gap-2">
                 <Label className="text-white/70">Nome Completo</Label>
-                <Input value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} />
+                <Input value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} />
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -308,7 +326,7 @@ const ProfileSettings = ({ session }) => {
                 </div>
                 <div className="grid gap-2">
                   <Label className="text-white/70">Telefone / WhatsApp</Label>
-                  <Input value={formData.phone} onChange={(e) => setFormData({...formData, phone: e.target.value})} placeholder="(00) 00000-0000" />
+                  <Input value={formData.phone} onChange={(e) => setFormData({ ...formData, phone: e.target.value })} placeholder="(00) 00000-0000" />
                 </div>
               </div>
 
@@ -325,35 +343,35 @@ const ProfileSettings = ({ session }) => {
             <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2"><Calendar className="h-4 w-4 text-[#E2C28A]" /> Integrações</h3>
 
             <div className="flex flex-col gap-4 p-4 rounded-xl bg-white/5 border border-white/5">
-               <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-4">
-                    <div className="w-10 h-10 bg-white/10 rounded-full flex items-center justify-center p-2">
-                      <img src="https://www.gstatic.com/images/branding/product/1x/calendar_2020q4_48dp.png" className="w-full h-full object-contain" alt="Google" />
-                    </div>
-                    <div>
-                      <h4 className="font-bold text-white text-sm">Google Calendar</h4>
-                      <p className="text-xs text-white/50">{calendarConnected ? "Sincronizado e ativo." : "Conecte sua agenda para permitir agendamentos."}</p>
-                    </div>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className="w-10 h-10 bg-white/10 rounded-full flex items-center justify-center p-2">
+                    <img src="https://www.gstatic.com/images/branding/product/1x/calendar_2020q4_48dp.png" className="w-full h-full object-contain" alt="Google" />
                   </div>
+                  <div>
+                    <h4 className="font-bold text-white text-sm">Google Calendar</h4>
+                    <p className="text-xs text-white/50">{calendarConnected ? "Sincronizado e ativo." : "Conecte sua agenda para permitir agendamentos."}</p>
+                  </div>
+                </div>
 
-                  {calendarConnected ? (
-                     <div className="flex items-center gap-2">
-                       <div className="flex items-center gap-1.5 px-2 py-1 bg-green-500/10 text-green-400 rounded text-xs border border-green-500/20">
-                         <CheckCircle2 className="h-3 w-3" /> Conectado
-                       </div>
-                       <Button variant="ghost" size="icon" onClick={() => setShowCalendarModal(true)} className="text-white/50 hover:text-white h-8 w-8" title="Configurar Agenda">
-                          <RefreshCw className="h-4 w-4" />
-                       </Button>
-                       <Button variant="ghost" size="icon" onClick={handleDisconnectGoogle} className="text-red-400 hover:text-red-300 h-8 w-8" title="Desconectar">
-                         <LogOut className="h-4 w-4" />
-                       </Button>
-                     </div>
-                  ) : (
-                     <Button size="sm" onClick={handleConnectGoogle} className="bg-white text-[#0A1B3D] hover:bg-gray-100 font-bold text-xs">
-                        Conectar
-                     </Button>
-                  )}
-               </div>
+                {calendarConnected ? (
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 px-2 py-1 bg-green-500/10 text-green-400 rounded text-xs border border-green-500/20">
+                      <CheckCircle2 className="h-3 w-3" /> Conectado
+                    </div>
+                    <Button variant="ghost" size="icon" onClick={() => setShowCalendarModal(true)} className="text-white/50 hover:text-white h-8 w-8" title="Configurar Agenda">
+                      <RefreshCw className="h-4 w-4" />
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={handleDisconnectGoogle} className="text-red-400 hover:text-red-300 h-8 w-8" title="Desconectar">
+                      <LogOut className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ) : (
+                  <Button size="sm" onClick={handleConnectGoogle} className="bg-white text-[#0A1B3D] hover:bg-gray-100 font-bold text-xs">
+                    Conectar
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -363,8 +381,8 @@ const ProfileSettings = ({ session }) => {
           <div className="bg-[#0A1B3D]/60 backdrop-blur-md border border-white/10 rounded-xl p-6">
             <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2"><Lock className="h-4 w-4 text-[#E2C28A]" /> Segurança</h3>
             <div className="space-y-4">
-              <div className="grid gap-2"><Label className="text-white/70">Nova Senha</Label><Input type="password" value={passwords.newPassword} onChange={(e) => setPasswords({...passwords, newPassword: e.target.value})} className="bg-white/5 border-white/10" /></div>
-              <div className="grid gap-2"><Label className="text-white/70">Confirmar Senha</Label><Input type="password" value={passwords.confirmPassword} onChange={(e) => setPasswords({...passwords, confirmPassword: e.target.value})} className="bg-white/5 border-white/10" /></div>
+              <div className="grid gap-2"><Label className="text-white/70">Nova Senha</Label><Input type="password" value={passwords.newPassword} onChange={(e) => setPasswords({ ...passwords, newPassword: e.target.value })} className="bg-white/5 border-white/10" /></div>
+              <div className="grid gap-2"><Label className="text-white/70">Confirmar Senha</Label><Input type="password" value={passwords.confirmPassword} onChange={(e) => setPasswords({ ...passwords, confirmPassword: e.target.value })} className="bg-white/5 border-white/10" /></div>
               <Button onClick={handlePasswordUpdate} disabled={passLoading} variant="outline" className="w-full border-white/10 bg-white/5 hover:bg-white/10 text-white border-dashed">
                 {passLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Atualizar Senha'}
               </Button>
@@ -373,10 +391,10 @@ const ProfileSettings = ({ session }) => {
         </div>
       </div>
 
-      <CalendarSetupModal 
-        isOpen={showCalendarModal} 
-        onClose={() => setShowCalendarModal(false)} 
-        userId={session.user.id} 
+      <CalendarSetupModal
+        isOpen={showCalendarModal}
+        onClose={() => setShowCalendarModal(false)}
+        userId={session.user.id}
       />
     </motion.div>
   );

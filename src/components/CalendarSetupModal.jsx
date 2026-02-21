@@ -24,38 +24,26 @@ const CalendarSetupModal = ({ isOpen, onClose, userId }) => {
     setLoading(true);
     setError(null);
     try {
-      // 1. Get Access Token
-      const { data: integ, error: dbError } = await supabase
-        .from('calendar_integrations')
-        .select('access_token, selected_calendar_id')
-        .eq('user_id', userId)
-        .eq('provider', 'google')
-        .maybeSingle();
-
-      if (dbError) throw dbError;
-
-      if (!integ) {
-        throw new Error("Integração não encontrada. Conecte sua conta primeiro.");
-      }
-
-      // 2. Fetch Calendars from Google via Edge Function
-      const { data, error: funcError } = await supabase.functions.invoke('google-calendar', {
-        body: { 
-          action: 'listCalendars', 
-          access_token: integ.access_token 
-        }
-      });
+      // Fetch Calendars via Unified Edge Function
+      const { data, error: funcError } = await supabase.functions.invoke('google-calendar?action=list-calendars');
 
       if (funcError) throw funcError;
       if (data?.error) throw new Error(data.error);
 
-      setCalendars(data.calendars || []);
-      
-      // 3. Set selected calendar (from DB or default to primary)
-      if (integ.selected_calendar_id) {
-        setSelectedCalendar(integ.selected_calendar_id);
-      } else if (data.calendars) {
-        const primary = data.calendars.find(c => c.primary);
+      const calendarList = data.items || [];
+      setCalendars(calendarList);
+
+      // Get current selection from profile
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('selected_calendar_id')
+        .eq('id', userId)
+        .single();
+
+      if (profile?.selected_calendar_id) {
+        setSelectedCalendar(profile.selected_calendar_id);
+      } else if (calendarList.length > 0) {
+        const primary = calendarList.find(c => c.primary);
         if (primary) setSelectedCalendar(primary.id);
       }
 
@@ -72,10 +60,9 @@ const CalendarSetupModal = ({ isOpen, onClose, userId }) => {
     setSaving(true);
     try {
       const { error } = await supabase
-        .from('calendar_integrations')
+        .from('profiles')
         .update({ selected_calendar_id: selectedCalendar })
-        .eq('user_id', userId)
-        .eq('provider', 'google');
+        .eq('id', userId);
 
       if (error) throw error;
 
@@ -101,7 +88,7 @@ const CalendarSetupModal = ({ isOpen, onClose, userId }) => {
           </div>
           <DialogTitle className="text-center text-xl">Selecionar Agenda</DialogTitle>
           <DialogDescription className="text-center text-white/50">
-             Escolha onde os novos agendamentos devem ser criados.
+            Escolha onde os novos agendamentos devem ser criados.
           </DialogDescription>
         </DialogHeader>
 
@@ -113,43 +100,43 @@ const CalendarSetupModal = ({ isOpen, onClose, userId }) => {
             </div>
           ) : error ? (
             <div className="flex flex-col items-center gap-3 p-4 bg-red-500/10 rounded-lg border border-red-500/20 text-center">
-               <AlertCircle className="h-6 w-6 text-red-400" />
-               <p className="text-sm text-red-200">{error}</p>
-               <Button size="sm" variant="outline" onClick={fetchCalendars} className="mt-2 border-white/10 text-white">
-                 Tentar Novamente
-               </Button>
+              <AlertCircle className="h-6 w-6 text-red-400" />
+              <p className="text-sm text-red-200">{error}</p>
+              <Button size="sm" variant="outline" onClick={fetchCalendars} className="mt-2 border-white/10 text-white">
+                Tentar Novamente
+              </Button>
             </div>
           ) : (
-             <div className="space-y-4 animate-in fade-in">
-               <div className="space-y-2">
-                 <label className="text-sm font-medium text-white/70">Agenda Principal</label>
-                 <Select value={selectedCalendar} onValueChange={setSelectedCalendar}>
-                    <SelectTrigger className="bg-white/5 border-white/10 text-white">
-                      <SelectValue placeholder="Selecione uma agenda" />
-                    </SelectTrigger>
-                    <SelectContent className="bg-[#0A1B3D] border-white/10 text-white">
-                      {calendars.map((cal) => (
-                        <SelectItem key={cal.id} value={cal.id}>
-                          {cal.summary} {cal.primary && '(Principal)'}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                 </Select>
-               </div>
-             </div>
+            <div className="space-y-4 animate-in fade-in">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-white/70">Agenda Principal</label>
+                <Select value={selectedCalendar} onValueChange={setSelectedCalendar}>
+                  <SelectTrigger className="bg-white/5 border-white/10 text-white">
+                    <SelectValue placeholder="Selecione uma agenda" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-[#0A1B3D] border-white/10 text-white">
+                    {calendars.map((cal) => (
+                      <SelectItem key={cal.id} value={cal.id}>
+                        {cal.summary} {cal.primary && '(Principal)'}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
           )}
 
           <div className="flex gap-3">
-             <Button variant="outline" onClick={onClose} className="flex-1 bg-transparent border-white/10 text-white hover:bg-white/5">
-               Cancelar
-             </Button>
-             <Button 
-                onClick={handleSave} 
-                disabled={loading || saving || !selectedCalendar || !!error}
-                className="flex-1 bg-[#E2C28A] text-[#0A1B3D] hover:bg-[#d4b06a]"
-             >
-                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Confirmar Seleção'}
-             </Button>
+            <Button variant="outline" onClick={onClose} className="flex-1 bg-transparent border-white/10 text-white hover:bg-white/5">
+              Cancelar
+            </Button>
+            <Button
+              onClick={handleSave}
+              disabled={loading || saving || !selectedCalendar || !!error}
+              className="flex-1 bg-[#E2C28A] text-[#0A1B3D] hover:bg-[#d4b06a]"
+            >
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Confirmar Seleção'}
+            </Button>
           </div>
         </div>
       </DialogContent>

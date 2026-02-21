@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { 
-  Calendar, Clock, CheckCircle2, Phone, MessageCircle, UserCircle2, RotateCcw, XCircle, Loader2 
+import {
+  Calendar, Clock, CheckCircle2, Phone, MessageCircle, UserCircle2, RotateCcw, XCircle, Loader2
 } from 'lucide-react';
 import { supabase } from '@/lib/customSupabaseClient';
 import { format, addMinutes } from 'date-fns';
@@ -42,40 +42,31 @@ const RescheduleModal = ({ appointment, isOpen, onClose, onRescheduleSuccess }) 
       setSelectedSlot(null);
 
       try {
-        console.log(`[Reschedule] Checking availability...`);
-
-        // Get integration details to verify connection & pass token
-        // Fixed: Used .maybeSingle() to handle missing integration
-        const { data: integration } = await supabase
-           .from('calendar_integrations')
-           .select('access_token, expires_at')
-           .eq('user_id', appointment.closer_id)
-           .eq('provider', 'google')
-           .maybeSingle();
-
+        // A. Google Slots via Unified function
         let googleBusy = [];
-        const now = new Date();
-        const isExpired = integration ? new Date(integration.expires_at) < now : true;
+        try {
+          const { data: googleData, error } = await supabase.functions.invoke('google-calendar?action=list-slots', {
+            method: 'POST',
+            body: {
+              target_user_id: appointment.closer_id,
+              timeMin: new Date(`${date}T00:00:00-03:00`).toISOString(),
+              timeMax: new Date(`${date}T23:59:59-03:00`).toISOString()
+            }
+          });
 
-        if (integration && !isExpired) {
-           try {
-              const { data: googleData, error } = await supabase.functions.invoke('google-calendar', {
-                body: {
-                  action: 'list-slots',
-                  closer_id: appointment.closer_id,
-                  date: date,
-                  access_token: integration.access_token 
-                }
-              });
-              
-              if (error) throw error;
-              if (googleData?.error) throw new Error(googleData.error);
-              if (googleData?.busy) googleBusy = googleData.busy;
+          if (error) throw error;
+          if (googleData?.error) throw new Error(googleData.error);
 
-           } catch (e) {
-              console.error('Google Calendar Error:', e);
-              // Fallback silently if calendar fails
-           }
+          if (googleData?.calendars) {
+            // Get the profile to know which calendar to check
+            const { data: profile } = await supabase.from('profiles').select('selected_calendar_id').eq('id', appointment.closer_id).single();
+            const calId = profile?.selected_calendar_id || 'primary';
+            googleBusy = googleData.calendars[calId]?.busy || [];
+          }
+
+        } catch (e) {
+          console.error('Google Calendar Error:', e);
+          // Fallback silently if calendar fails
         }
 
         // B. Internal Appts
@@ -85,7 +76,7 @@ const RescheduleModal = ({ appointment, isOpen, onClose, onRescheduleSuccess }) 
           .from('appointments')
           .select('scheduled_at, duration, end_time')
           .eq('closer_id', appointment.closer_id)
-          .neq('id', appointment.id) 
+          .neq('id', appointment.id)
           .neq('status', 'cancelled')
           .gte('scheduled_at', startOfDay)
           .lte('scheduled_at', endOfDay);
@@ -116,48 +107,26 @@ const RescheduleModal = ({ appointment, isOpen, onClose, onRescheduleSuccess }) 
       const startDateTime = new Date(`${date}T${selectedSlot}:00-03:00`);
       const endDateTime = addMinutes(startDateTime, SLOT_DURATION);
 
-      // Check integration first
-      // Fixed: Used .maybeSingle() to handle missing integration
-      const { data: integration } = await supabase
-         .from('calendar_integrations')
-         .select('access_token, expires_at')
-         .eq('user_id', appointment.closer_id)
-         .eq('provider', 'google')
-         .maybeSingle();
-         
-      const isExpired = integration ? new Date(integration.expires_at) < new Date() : true;
-
       if (appointment.google_calendar_event_id && !appointment.google_calendar_event_id.startsWith('manual')) {
-        if (!integration || isExpired) {
-           toast({ 
-              title: "Erro de Integração", 
-              description: "A integração com Google Calendar expirou ou não existe.", 
-              variant: "destructive" 
-           });
-           // Task says "Stop loading spinner if any operation fails". 
-           // I will block remote update but allow local update with warning.
-        } else {
-           try {
-             const { error, data } = await supabase.functions.invoke('google-calendar', {
-               body: {
-                 action: 'update-event',
-                 closer_id: appointment.closer_id,
-                 event_id: appointment.google_calendar_event_id,
-                 event_details: {
-                   start: { dateTime: startDateTime.toISOString() },
-                   end: { dateTime: endDateTime.toISOString() }
-                 },
-                 access_token: integration.access_token
-               }
-             });
-             
-             if (error) throw error;
-             if (data?.error) throw new Error(data.error);
+        try {
+          const { error, data } = await supabase.functions.invoke('google-calendar?action=update-event', {
+            method: 'POST',
+            body: {
+              target_user_id: appointment.closer_id,
+              event_id: appointment.google_calendar_event_id,
+              event: {
+                start: { dateTime: startDateTime.toISOString() },
+                end: { dateTime: endDateTime.toISOString() }
+              }
+            }
+          });
 
-           } catch (e) {
-              console.error('Update Event Error:', e);
-              toast({ title: "Aviso", description: "Falha ao atualizar Google Calendar.", className: "bg-amber-500 text-white border-none" });
-           }
+          if (error) throw error;
+          if (data?.error) throw new Error(data.error);
+
+        } catch (e) {
+          console.error('Update Event Error:', e);
+          toast({ title: "Aviso", description: "Falha ao atualizar Google Calendar.", className: "bg-amber-500 text-white border-none" });
         }
       }
 
@@ -204,8 +173,8 @@ const RescheduleModal = ({ appointment, isOpen, onClose, onRescheduleSuccess }) 
         <div className="space-y-4 py-4">
           <div className="space-y-2">
             <Label>Nova Data</Label>
-            <Input 
-              type="date" 
+            <Input
+              type="date"
               value={date}
               min={format(new Date(), 'yyyy-MM-dd')}
               onChange={(e) => setDate(e.target.value)}
@@ -215,42 +184,42 @@ const RescheduleModal = ({ appointment, isOpen, onClose, onRescheduleSuccess }) 
           <div className="space-y-2">
             <Label>Horários ({SLOT_DURATION}min fixo)</Label>
             {loadingSlots ? (
-               <div className="flex justify-center py-4"><Loader2 className="animate-spin text-[#E2C28A]" /></div>
+              <div className="flex justify-center py-4"><Loader2 className="animate-spin text-[#E2C28A]" /></div>
             ) : (
-               <div className="grid grid-cols-4 gap-2 max-h-[200px] overflow-y-auto">
-                 {availableSlots.length > 0 ? availableSlots.map((slot, idx) => (
-                   <button
-                     key={idx}
-                     disabled={!slot.available}
-                     onClick={() => setSelectedSlot(slot.time)}
-                     className={cn(
-                       "text-xs py-2 rounded border transition-all",
-                       !slot.available 
-                         ? "bg-white/5 text-white/20 border-transparent cursor-not-allowed line-through" 
-                         : selectedSlot === slot.time
-                           ? "bg-[#E2C28A] text-[#0A1B3D] border-[#E2C28A]"
-                           : "bg-white/5 border-white/10 hover:border-[#E2C28A]"
-                     )}
-                   >
-                     {slot.time}
-                   </button>
-                 )) : (
-                   <p className="text-xs text-white/30 col-span-4 text-center py-2">Selecione uma data para ver horários.</p>
-                 )}
-               </div>
+              <div className="grid grid-cols-4 gap-2 max-h-[200px] overflow-y-auto">
+                {availableSlots.length > 0 ? availableSlots.map((slot, idx) => (
+                  <button
+                    key={idx}
+                    disabled={!slot.available}
+                    onClick={() => setSelectedSlot(slot.time)}
+                    className={cn(
+                      "text-xs py-2 rounded border transition-all",
+                      !slot.available
+                        ? "bg-white/5 text-white/20 border-transparent cursor-not-allowed line-through"
+                        : selectedSlot === slot.time
+                          ? "bg-[#E2C28A] text-[#0A1B3D] border-[#E2C28A]"
+                          : "bg-white/5 border-white/10 hover:border-[#E2C28A]"
+                    )}
+                  >
+                    {slot.time}
+                  </button>
+                )) : (
+                  <p className="text-xs text-white/30 col-span-4 text-center py-2">Selecione uma data para ver horários.</p>
+                )}
+              </div>
             )}
           </div>
         </div>
 
         <div className="flex justify-end gap-2">
-           <Button variant="ghost" onClick={onClose} className="text-white hover:bg-white/10">Cancelar</Button>
-           <Button 
-             onClick={handleConfirmReschedule} 
-             disabled={!selectedSlot || saving}
-             className="bg-[#E2C28A] text-[#0A1B3D] hover:bg-[#d4b06a]"
-           >
-             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Confirmar Novo Horário'}
-           </Button>
+          <Button variant="ghost" onClick={onClose} className="text-white hover:bg-white/10">Cancelar</Button>
+          <Button
+            onClick={handleConfirmReschedule}
+            disabled={!selectedSlot || saving}
+            className="bg-[#E2C28A] text-[#0A1B3D] hover:bg-[#d4b06a]"
+          >
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Confirmar Novo Horário'}
+          </Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -288,13 +257,13 @@ const AppointmentList = ({ userId }) => {
 
   useEffect(() => {
     fetchAppointments();
-    
+
     const channel = supabase.channel('appointments_list')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments' }, 
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments' },
         () => { fetchAppointments(); }
       )
       .subscribe();
-      
+
     return () => {
       supabase.removeChannel(channel);
     };
@@ -302,39 +271,23 @@ const AppointmentList = ({ userId }) => {
 
   const handleCancel = async () => {
     if (!cancelData) return;
-    
-    try {
-      // Check integration
-      // Fixed: Used .maybeSingle() to handle missing integration
-      const { data: integration } = await supabase
-         .from('calendar_integrations')
-         .select('access_token, expires_at')
-         .eq('user_id', cancelData.closer_id)
-         .eq('provider', 'google')
-         .maybeSingle();
-         
-      const isExpired = integration ? new Date(integration.expires_at) < new Date() : true;
 
-      // 1. Delete from Google Calendar if exists and integrated
+    try {
+      // 1. Delete from Google Calendar if exists
       if (cancelData.google_calendar_event_id && !cancelData.google_calendar_event_id.startsWith('manual')) {
-        if (!integration || isExpired) {
-           console.warn("Skipping Google Calendar deletion - Integration missing or expired");
-           // Proceed to delete local only
-        } else {
-           try {
-             const { error, data } = await supabase.functions.invoke('google-calendar', {
-                body: {
-                  action: 'delete-event',
-                  closer_id: cancelData.closer_id,
-                  event_id: cancelData.google_calendar_event_id,
-                  access_token: integration.access_token
-                }
-              });
-              if (error) throw error;
-              if (data?.error) throw new Error(data.error);
-           } catch (e) {
-              console.error('Delete event error:', e);
-           }
+        try {
+          const { error, data } = await supabase.functions.invoke('google-calendar?action=delete-event', {
+            method: 'POST',
+            body: {
+              target_user_id: cancelData.closer_id,
+              event_id: cancelData.google_calendar_event_id
+            }
+          });
+          if (error) throw error;
+          if (data?.error) throw new Error(data.error);
+        } catch (e) {
+          console.error('Delete event error:', e);
+          // Non-fatal for the local deletion
         }
       }
 
@@ -391,49 +344,49 @@ const AppointmentList = ({ userId }) => {
                 >
                   <div className="flex flex-col md:flex-row justify-between gap-6 pointer-events-none">
                     <div className="flex gap-4">
-                       <div className="flex flex-col items-center justify-center min-w-[60px] h-[60px] bg-white/5 rounded-lg border border-white/10">
-                          <span className="text-xs text-white/40 uppercase font-bold">{apt.scheduled_at && format(new Date(apt.scheduled_at), 'MMM', { locale: ptBR })}</span>
-                          <span className="text-xl font-bold text-white">{apt.scheduled_at && format(new Date(apt.scheduled_at), 'dd')}</span>
-                       </div>
-                       
-                       <div>
-                          <h4 className="font-bold text-white text-lg flex items-center gap-2">
-                            {apt.client_name}
-                            {apt.status === 'confirmed' && <CheckCircle2 className="h-4 w-4 text-green-500" />}
-                          </h4>
-                          <div className="flex items-center gap-4 mt-1 text-sm text-white/50">
-                            <span className="flex items-center gap-1"><Clock className="h-3 w-3" /> {apt.scheduled_at && format(new Date(apt.scheduled_at), 'HH:mm')}</span>
-                            {apt.duration && <span className="flex items-center gap-1 text-[#E2C28A]">({apt.duration} min)</span>}
-                            {apt.client_phone && <span className="flex items-center gap-1"><Phone className="h-3 w-3" /> {apt.client_phone}</span>}
-                          </div>
-                       </div>
+                      <div className="flex flex-col items-center justify-center min-w-[60px] h-[60px] bg-white/5 rounded-lg border border-white/10">
+                        <span className="text-xs text-white/40 uppercase font-bold">{apt.scheduled_at && format(new Date(apt.scheduled_at), 'MMM', { locale: ptBR })}</span>
+                        <span className="text-xl font-bold text-white">{apt.scheduled_at && format(new Date(apt.scheduled_at), 'dd')}</span>
+                      </div>
+
+                      <div>
+                        <h4 className="font-bold text-white text-lg flex items-center gap-2">
+                          {apt.client_name}
+                          {apt.status === 'confirmed' && <CheckCircle2 className="h-4 w-4 text-green-500" />}
+                        </h4>
+                        <div className="flex items-center gap-4 mt-1 text-sm text-white/50">
+                          <span className="flex items-center gap-1"><Clock className="h-3 w-3" /> {apt.scheduled_at && format(new Date(apt.scheduled_at), 'HH:mm')}</span>
+                          {apt.duration && <span className="flex items-center gap-1 text-[#E2C28A]">({apt.duration} min)</span>}
+                          {apt.client_phone && <span className="flex items-center gap-1"><Phone className="h-3 w-3" /> {apt.client_phone}</span>}
+                        </div>
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-6 border-t md:border-t-0 md:border-l border-white/5 pt-4 md:pt-0 md:pl-6">
-                       <div className="text-right hidden md:block">
-                          <p className="text-[10px] uppercase font-bold text-white/30 mb-1">Agendado por</p>
-                          <div className="flex items-center justify-end gap-2">
-                             <span className="text-sm font-medium text-white">{apt.scheduler?.name || 'Sistema'}</span>
-                             <Avatar className="h-6 w-6 border border-white/10">
-                                <AvatarImage src={apt.scheduler?.avatar_url} />
-                                <AvatarFallback className="bg-white/10 text-[10px] text-white">
-                                  {apt.scheduler?.name?.charAt(0) || 'S'}
-                                </AvatarFallback>
-                             </Avatar>
-                          </div>
-                       </div>
-                       <div className="text-right hidden md:block border-l border-white/10 pl-6">
-                          <p className="text-[10px] uppercase font-bold text-white/30 mb-1">Closer</p>
-                          <div className="flex items-center justify-end gap-2">
-                             <span className="text-sm font-medium text-white">{apt.closer?.name || 'Não atribuído'}</span>
-                             <Avatar className="h-6 w-6 border border-[#E2C28A]/30">
-                                <AvatarImage src={apt.closer?.avatar_url} />
-                                <AvatarFallback className="bg-[#E2C28A] text-[10px] text-[#0A1B3D]">
-                                  {apt.closer?.name?.charAt(0) || '?'}
-                                </AvatarFallback>
-                             </Avatar>
-                          </div>
-                       </div>
+                      <div className="text-right hidden md:block">
+                        <p className="text-[10px] uppercase font-bold text-white/30 mb-1">Agendado por</p>
+                        <div className="flex items-center justify-end gap-2">
+                          <span className="text-sm font-medium text-white">{apt.scheduler?.name || 'Sistema'}</span>
+                          <Avatar className="h-6 w-6 border border-white/10">
+                            <AvatarImage src={apt.scheduler?.avatar_url} />
+                            <AvatarFallback className="bg-white/10 text-[10px] text-white">
+                              {apt.scheduler?.name?.charAt(0) || 'S'}
+                            </AvatarFallback>
+                          </Avatar>
+                        </div>
+                      </div>
+                      <div className="text-right hidden md:block border-l border-white/10 pl-6">
+                        <p className="text-[10px] uppercase font-bold text-white/30 mb-1">Closer</p>
+                        <div className="flex items-center justify-end gap-2">
+                          <span className="text-sm font-medium text-white">{apt.closer?.name || 'Não atribuído'}</span>
+                          <Avatar className="h-6 w-6 border border-[#E2C28A]/30">
+                            <AvatarImage src={apt.closer?.avatar_url} />
+                            <AvatarFallback className="bg-[#E2C28A] text-[10px] text-[#0A1B3D]">
+                              {apt.closer?.name?.charAt(0) || '?'}
+                            </AvatarFallback>
+                          </Avatar>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </motion.div>
@@ -445,7 +398,7 @@ const AppointmentList = ({ userId }) => {
                     Gerencie o agendamento de {apt.client_name}.
                   </DialogDescription>
                 </DialogHeader>
-                
+
                 <div className="space-y-4 py-4">
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1">
@@ -481,7 +434,7 @@ const AppointmentList = ({ userId }) => {
                   </div>
 
                   {apt.client_phone && (
-                    <Button 
+                    <Button
                       className="w-full bg-[#25D366] hover:bg-[#128c7e] text-white font-bold"
                       onClick={() => window.open(getWhatsAppLink(apt.client_phone), '_blank')}
                     >
@@ -489,20 +442,20 @@ const AppointmentList = ({ userId }) => {
                       Chamar no WhatsApp
                     </Button>
                   )}
-                  
+
                   {/* Actions Row */}
                   <div className="grid grid-cols-2 gap-3 pt-2">
-                    <Button 
-                       variant="outline" 
-                       className="border-white/10 text-white hover:bg-white/5"
-                       onClick={() => setRescheduleData(apt)}
+                    <Button
+                      variant="outline"
+                      className="border-white/10 text-white hover:bg-white/5"
+                      onClick={() => setRescheduleData(apt)}
                     >
                       <RotateCcw className="mr-2 h-4 w-4" /> Reagendar
                     </Button>
-                    <Button 
-                       variant="destructive" 
-                       className="bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20"
-                       onClick={() => setCancelData(apt)}
+                    <Button
+                      variant="destructive"
+                      className="bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20"
+                      onClick={() => setCancelData(apt)}
                     >
                       <XCircle className="mr-2 h-4 w-4" /> Cancelar
                     </Button>
@@ -515,9 +468,9 @@ const AppointmentList = ({ userId }) => {
       )}
 
       {/* Reschedule Modal (Separate Dialog) */}
-      <RescheduleModal 
-        appointment={rescheduleData} 
-        isOpen={!!rescheduleData} 
+      <RescheduleModal
+        appointment={rescheduleData}
+        isOpen={!!rescheduleData}
         onClose={() => setRescheduleData(null)}
         onRescheduleSuccess={fetchAppointments}
       />
@@ -528,15 +481,15 @@ const AppointmentList = ({ userId }) => {
           <AlertDialogHeader>
             <AlertDialogTitle>Cancelar Agendamento?</AlertDialogTitle>
             <AlertDialogDescription className="text-white/50">
-              Esta ação removerá o agendamento do sistema e do Google Calendar do Closer. 
+              Esta ação removerá o agendamento do sistema e do Google Calendar do Closer.
               Esta ação não pode ser desfeita.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel className="bg-transparent border-white/10 text-white hover:bg-white/5">Voltar</AlertDialogCancel>
-            <AlertDialogAction 
-               onClick={handleCancel}
-               className="bg-red-500 hover:bg-red-600 text-white border-none"
+            <AlertDialogAction
+              onClick={handleCancel}
+              className="bg-red-500 hover:bg-red-600 text-white border-none"
             >
               Sim, Cancelar
             </AlertDialogAction>
